@@ -146,6 +146,25 @@ def main():
 
     payments = paginate("/payments", headers)
     contacts = paginate("/contacts", headers)
+
+    # Log field NAMES only (never values) so a schema mismatch can be diagnosed
+    # from the public Actions log without ever putting donor data in it.
+    def _shape(d, prefix=""):
+        out = []
+        for k, v in d.items():
+            out.append(f"{prefix}{k}: {type(v).__name__}")
+            if isinstance(v, dict):
+                out.extend(_shape(v, prefix + "  "))
+            elif isinstance(v, list) and v and isinstance(v[0], dict):
+                out.append(f"{prefix}  [0] ->")
+                out.extend(_shape(v[0], prefix + "    "))
+        return out
+
+    if payments:
+        print("Sample payment field names:\n  " + "\n  ".join(_shape(payments[0])))
+    if contacts:
+        print("Sample contact field names:\n  " + "\n  ".join(_shape(contacts[0])))
+
     contact_map = {}
     for c in contacts:
         name = " ".join(
