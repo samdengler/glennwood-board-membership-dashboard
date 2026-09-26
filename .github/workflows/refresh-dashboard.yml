@@ -1,0 +1,52 @@
+name: Refresh board dashboard
+
+on:
+  schedule:
+    # 09:15 UTC ~= 05:15 America/New_York, nightly
+    - cron: "15 9 * * *"
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "site/template.html"
+      - "scripts/build_dashboard.py"
+      - ".github/workflows/refresh-dashboard.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build dashboard from Zeffy data
+        env:
+          ZEFFY_API_KEY: ${{ secrets.ZEFFY_API_KEY }}
+          DASHBOARD_PASSWORD_HASH: ${{ secrets.DASHBOARD_PASSWORD_HASH }}
+        run: python3 scripts/build_dashboard.py
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,4 @@
+dist/
+build_debug.json
+__pycache__/
+*.pyc
