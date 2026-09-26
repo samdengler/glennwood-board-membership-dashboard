@@ -98,6 +98,12 @@ def first_present(d, keys, default=None):
     return default
 
 
+def payment_amount(p):
+    # Zeffy's API reports amount in the minor currency unit (cents for USD),
+    # matching the convention most payment APIs use, not dollars.
+    return float(p.get("amount") or 0) / 100.0
+
+
 def line_item_label(item):
     return first_present(
         item, ["title", "name", "label", "productName", "ticketName", "description"],
@@ -157,8 +163,8 @@ def main():
     succeeded = [p for p in payments if str(p.get("status", "")).lower() == "succeeded"]
     not_succeeded = [p for p in payments if str(p.get("status", "")).lower() != "succeeded"]
 
-    total_raised = sum(float(p.get("amount") or 0) for p in succeeded)
-    incomplete_amount = sum(float(p.get("amount") or 0) for p in not_succeeded)
+    total_raised = sum(payment_amount(p) for p in succeeded)
+    incomplete_amount = sum(payment_amount(p) for p in not_succeeded)
 
     monthly = defaultdict(float)
     monthly_labels = {}
@@ -167,7 +173,7 @@ def main():
         if not created:
             continue
         key, label = month_key(created)
-        monthly[key] += float(p.get("amount") or 0)
+        monthly[key] += payment_amount(p)
         monthly_labels[key] = label
     monthly_series = [
         {"key": k, "label": monthly_labels[k], "amount": round(v, 2)}
@@ -179,7 +185,7 @@ def main():
         items = p.get("lineItems") or [{}]
         label = " + ".join(sorted({line_item_label(i) for i in items})) or "Payment"
         mix[label]["count"] += 1
-        mix[label]["amount"] += float(p.get("amount") or 0)
+        mix[label]["amount"] += payment_amount(p)
     mix_series = [
         {"label": k, "count": v["count"], "amount": round(v["amount"], 2)}
         for k, v in sorted(mix.items(), key=lambda kv: -kv[1]["amount"])
@@ -193,7 +199,7 @@ def main():
         h["name"] = info["name"]
         h["email"] = info["email"]
         h["payments"] += 1
-        h["total"] += float(p.get("amount") or 0)
+        h["total"] += payment_amount(p)
         for item in (p.get("lineItems") or [{}]):
             h["plans"].add(line_item_label(item))
             rec = line_item_recurring(item)
