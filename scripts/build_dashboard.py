@@ -9,14 +9,21 @@ Required environment variables:
   DASHBOARD_PASSWORD_HASH - hex SHA-256 of the shared board password
                             (see scripts/hash_password.py to generate one)
 
-Zeffy API reference used here (read-only, per-organization key):
+Zeffy API reference used here (read-only, per-organization key), confirmed
+against a live pull on 2026-09-26:
   Base URL: https://api.zeffy.com/api/v1
   GET /payments   -> {data: [...], has_more, next_cursor}
+    payment: id, created (unix seconds), amount (cents), currency, status,
+      contact (contact id string), items[] (rate_title, amount, ...),
+      recurring {is_recurring, interval, ...}, buyer {...}
+    /payments only returns completed transactions; failed/abandoned checkout
+    attempts (visible in Zeffy's own export) aren't exposed here, so
+    "incomplete" in the dashboard totals will read 0 from this endpoint.
   GET /contacts   -> {data: [...], has_more, next_cursor}
-Field names below are the documented ones as of Sep 2026; if Zeffy's actual
-response differs, this script logs the first raw payment/contact it saw
-(build_debug.json, workflow-log only, never committed) so the mapping can
-be adjusted quickly.
+    contact: id, email, first_name, last_name, total_contribution (cents), ...
+If Zeffy changes these, this script writes the first raw payment/contact it
+saw to build_debug.json (workflow-log-only, never committed) so the mapping
+can be re-diagnosed.
 """
 import json
 import os
@@ -105,23 +112,29 @@ def payment_amount(p):
 
 
 def line_item_label(item):
+    # Confirmed field on Zeffy's /payments items[] is "rate_title"; the rest
+    # are kept as fallbacks in case a different item type omits it.
     return first_present(
-        item, ["title", "name", "label", "productName", "ticketName", "description"],
+        item, ["rate_title", "title", "name", "label", "productName", "ticketName", "description"],
         default="Payment",
     )
 
 
-def line_item_recurring(item):
-    val = first_present(item, ["recurring", "frequency", "recurrence"], default=None)
-    if isinstance(val, bool):
-        return "Yes" if val else "-"
-    if isinstance(val, str) and val.lower() not in ("", "one_time", "onetime", "none"):
-        return val.title()
-    return "-"
+def payment_recurring(p):
+    # Confirmed: recurrence lives on the payment itself, not per line item.
+    rec = p.get("recurring") or {}
+    if not rec.get("is_recurring"):
+        return "-"
+    interval = rec.get("interval")
+    return interval.title() if isinstance(interval, str) and interval else "Yes"
 
 
-def month_key(iso_dt):
-    dt = datetime.fromisoformat(iso_dt.replace("Z", "+00:00"))
+def month_key(created):
+    # Confirmed field: "created" is a Unix timestamp (seconds), not an ISO string.
+    if isinstance(created, (int, float)):
+        dt = datetime.fromtimestamp(created, tz=timezone.utc)
+    else:
+        dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
     return dt.strftime("%Y-%m"), dt.strftime("%b %Y")
 
 
@@ -147,28 +160,13 @@ def main():
     payments = paginate("/payments", headers)
     contacts = paginate("/contacts", headers)
 
-    # Log field NAMES only (never values) so a schema mismatch can be diagnosed
-    # from the public Actions log without ever putting donor data in it.
-    def _shape(d, prefix=""):
-        out = []
-        for k, v in d.items():
-            out.append(f"{prefix}{k}: {type(v).__name__}")
-            if isinstance(v, dict):
-                out.extend(_shape(v, prefix + "  "))
-            elif isinstance(v, list) and v and isinstance(v[0], dict):
-                out.append(f"{prefix}  [0] ->")
-                out.extend(_shape(v[0], prefix + "    "))
-        return out
-
-    if payments:
-        print("Sample payment field names:\n  " + "\n  ".join(_shape(payments[0])))
-    if contacts:
-        print("Sample contact field names:\n  " + "\n  ".join(_shape(contacts[0])))
-
     contact_map = {}
     for c in contacts:
         name = " ".join(
-            p for p in [first_present(c, ["firstName"], ""), first_present(c, ["lastName"], "")] if p
+            p for p in [
+                first_present(c, ["first_name", "firstName"], ""),
+                first_present(c, ["last_name", "lastName"], ""),
+            ] if p
         ).strip() or "(no name on file)"
         contact_map[c.get("id")] = {"name": name, "email": c.get("email", "")}
 
@@ -188,7 +186,7 @@ def main():
     monthly = defaultdict(float)
     monthly_labels = {}
     for p in succeeded:
-        created = p.get("createdAt")
+        created = p.get("created")
         if not created:
             continue
         key, label = month_key(created)
@@ -201,7 +199,7 @@ def main():
 
     mix = defaultdict(lambda: {"count": 0, "amount": 0.0})
     for p in succeeded:
-        items = p.get("lineItems") or [{}]
+        items = p.get("items") or [{}]
         label = " + ".join(sorted({line_item_label(i) for i in items})) or "Payment"
         mix[label]["count"] += 1
         mix[label]["amount"] += payment_amount(p)
@@ -212,18 +210,18 @@ def main():
 
     households = defaultdict(lambda: {"payments": 0, "total": 0.0, "plans": set(), "recurring": "-"})
     for p in succeeded:
-        cid = p.get("contactId") or "unknown"
+        cid = p.get("contact") or "unknown"
         info = contact_map.get(cid, {"name": "(unknown household)", "email": ""})
         h = households[cid]
         h["name"] = info["name"]
         h["email"] = info["email"]
         h["payments"] += 1
         h["total"] += payment_amount(p)
-        for item in (p.get("lineItems") or [{}]):
+        for item in (p.get("items") or [{}]):
             h["plans"].add(line_item_label(item))
-            rec = line_item_recurring(item)
-            if rec != "-":
-                h["recurring"] = rec
+        rec = payment_recurring(p)
+        if rec != "-":
+            h["recurring"] = rec
 
     household_list = sorted(
         (
