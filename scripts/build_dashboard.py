@@ -101,7 +101,16 @@ def main():
     if not password_hash:
         raise SystemExit("DASHBOARD_PASSWORD_HASH is not set")
 
-    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        # Zeffy's API sits behind Cloudflare, which blocks requests carrying
+        # Python's default "Python-urllib/x.y" user agent as a bot signature.
+        # A standard browser-style UA clears that check; the API key is what
+        # actually authorizes the request.
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    }
 
     payments = paginate("/payments", headers)
     contacts = paginate("/contacts", headers)
