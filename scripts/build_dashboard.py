@@ -20,6 +20,7 @@ be adjusted quickly.
 """
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -29,19 +30,43 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 API_BASE = "https://api.zeffy.com/api/v1"
+# Zeffy's documented cap; requesting the max page size means a full pull of a
+# small board's data (tens of records) fits in one or two requests instead of
+# many, which is what actually avoids the rate limit rather than backoff alone.
+PAGE_SIZE = 100
+MAX_ATTEMPTS = 6
+
+
+def _retry_delay(e, attempt):
+    retry_after = e.headers.get("Retry-After") if e.headers else None
+    if retry_after:
+        try:
+            return float(retry_after)
+        except ValueError:
+            pass
+    try:
+        body = e.read().decode("utf-8", "replace")
+    except Exception:
+        body = ""
+    m = re.search(r"retry after (\d+)", body, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    return min(60, 5 * (2 ** attempt))
 
 
 def api_get(path, headers, params=None):
     params = params or {}
     url = API_BASE + path + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers=headers)
-    for attempt in range(5):
+    for attempt in range(MAX_ATTEMPTS):
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 4:
-                time.sleep(2 ** attempt)
+            if e.code == 429 and attempt < MAX_ATTEMPTS - 1:
+                delay = _retry_delay(e, attempt)
+                print(f"Rate limited on {path}, waiting {delay:.0f}s (attempt {attempt + 1}/{MAX_ATTEMPTS})")
+                time.sleep(delay)
                 continue
             body = e.read().decode("utf-8", "replace")
             raise SystemExit(f"Zeffy API error {e.code} on {path}: {body}")
@@ -53,6 +78,7 @@ def paginate(path, headers, params=None):
     cursor = None
     while True:
         p = dict(params or {})
+        p.setdefault("limit", PAGE_SIZE)
         if cursor:
             p["cursor"] = cursor
         page = api_get(path, headers, p)
